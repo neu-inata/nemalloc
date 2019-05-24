@@ -3,10 +3,10 @@
 
 void * nemalloc(size_t size, uint32_t align)
 {
-	return malloc(size);
+	return _aligned_malloc(size, align);
 }
 
 void nefree(void * p)
 {
-	free(p);
+	_aligned_free(p);
 }
