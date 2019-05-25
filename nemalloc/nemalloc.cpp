@@ -20,9 +20,40 @@ static DWORD pageSize = 0;
 // small heap
 //[Heap[Page0[[Pool0][Pool1]...][Page1[[Pool0][Pool1]...]...]
 namespace sh {
+	uint32_t reserveSize;
 	uint8_t*heap;
 	uint32_t* pageIndexPool;
 	std::atomic<uint32_t> poolHead;
+
+	using Offset = uint32_t;
+
+	thread_local Offset buckets[NE_SMALL_MEM_ARRAY_SIZE];
+
+	void commit(int bucketIndex) {
+		NE_ASSERT(bucketIndex < _countof(buckets));
+
+		auto& bucket = buckets[bucketIndex];
+
+		// pageIndexの取得
+		uint32_t poolIndex = poolHead.fetch_sub(1);
+		if (poolIndex == UINT32_MAX) { return; }
+
+		uint32_t pageIndex = pageIndexPool[poolIndex];
+		pageIndexPool[poolIndex] = UINT32_MAX;
+
+		// 仮想アドレスのcommit
+		uint8_t* page = heap + pageSize * pageIndex;
+		[[maybe_unused]] auto res = VirtualAlloc(page, pageSize, MEM_COMMIT, PAGE_READWRITE);
+		NE_ASSERT(res == page);
+
+		// メモリ内部に位置情報を付ける
+		bucket = (Offset)(page - heap);
+		for (uint32_t i = 0; i < pageSize / (bucketIndex * NE_SMALL_UNIT_SIZE); i++) {
+			uint8_t* node = page + (i * bucketIndex * NE_SMALL_UNIT_SIZE);
+			*(Offset*)node = (Offset)(node - heap);
+		}
+	}
+
 };
 
 size_t alignmentSize(size_t size, size_t align)
@@ -34,6 +65,7 @@ void nemalloc_init(size_t shReserveSize)
 {
 	// SmallHeapは4GB以下を指定してください
 	NE_ASSERT(shReserveSize < UINT32_MAX);
+	sh::reserveSize = shReserveSize;
 
 	SYSTEM_INFO info;
 	GetSystemInfo(&info);
@@ -47,7 +79,7 @@ void nemalloc_init(size_t shReserveSize)
 	for (int i = 0; i < shReserveSize / pageSize; i++) {
 		sh::pageIndexPool[i] = i;
 	}
-	sh::poolHead = UINT32_MAX;
+	sh::poolHead = shReserveSize / pageSize - 1;
 }
 
 void * nemalloc(size_t size, uint32_t align = NE_SMALL_UNIT_SIZE)
