@@ -1,6 +1,7 @@
 ﻿
 #include <iostream>
 #include <stdio.h>
+#include <thread>
 #include "nemalloc.h"
 
 int main()
@@ -18,10 +19,10 @@ int main()
 		nefree(str);
 	}
 
-	// 大量mallocのテスト
-	{
-		constexpr uint32_t ARRAY_SIZE = 1024 * 1024;
-		uint8_t** pArray = (uint8_t**)nemalloc(sizeof(uint8_t*) * ARRAY_SIZE, 8);
+	auto MassSmallMemoryTest = []() {
+		printf("大量mallocのテスト - Start\n");
+		constexpr uint32_t ARRAY_SIZE = 1024 * 1024 * 8;
+		uint8_t** pArray = (uint8_t * *)nemalloc(sizeof(uint8_t*) * ARRAY_SIZE, 8);
 
 		for (int i = 0; i < ARRAY_SIZE; i++) {
 			auto& p = pArray[i];
@@ -36,7 +37,31 @@ int main()
 		}
 
 		nefree(pArray);
+		printf("大量mallocのテスト - End\n");
+	};
+	MassSmallMemoryTest();
+	
+	// スレッドテスト
+	{
+
+		printf("大量mallocのテスト - スレッド - Start\n");
+		{
+			auto threadNum = std::thread::hardware_concurrency();
+			std::thread* threads = new std::thread[threadNum];
+
+			for (int i = 0; i < threadNum; i++) {
+				threads[i] = std::thread(MassSmallMemoryTest);
+			}
+
+			for (int i = 0; i < threadNum; i++) {
+				threads[i].join();
+			}
+
+			delete[] threads;
+		}
+		printf("大量mallocのテスト - エンド - End\n");
 	}
+
 
 	nemalloc_finalize();
 }

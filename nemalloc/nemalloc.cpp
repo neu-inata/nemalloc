@@ -1,6 +1,7 @@
 #include "nemalloc.h"
 #include <malloc.h>
 #include <atomic>
+#include <mutex>
 #include <Windows.h>
 #include <memoryapi.h>
 #include <sysinfoapi.h>
@@ -23,7 +24,10 @@ namespace sh {
 	uint32_t reserveSize;
 	uint8_t*heap;
 	uint32_t* pageIndexPool;
-	std::atomic<uint32_t> poolHead;
+	static const uint32_t PAGE_INDEX_POOL_USED = UINT32_MAX;
+
+	uint32_t poolHead;
+	std::mutex commitMutex;
 
 	struct PageHeader {
 		uint16_t useCount;
@@ -36,15 +40,25 @@ namespace sh {
 
 	thread_local Offset buckets[NE_SMALL_MEM_ARRAY_SIZE] = {};
 
+	inline int BucketIndex2ElementSize(int bucketIndex) {
+		return (bucketIndex + 1) * NE_SMALL_UNIT_SIZE;
+	}
+
 	bool commit(int bucketIndex) {
 		NE_ASSERT(bucketIndex < _countof(buckets));
 
 		// pageIndexの取得
-		uint32_t poolIndex = poolHead.fetch_sub(1);
-		if (poolIndex == UINT32_MAX) { poolIndex = UINT32_MAX; return false; }
+		commitMutex.lock();
+		uint32_t poolIndex = poolHead--;
+		if (poolIndex == UINT32_MAX) {
+			poolHead++;
+			commitMutex.unlock();
+			return false; 
+		}
 
 		uint32_t pageIndex = pageIndexPool[poolIndex];
-		pageIndexPool[poolIndex] = UINT32_MAX;
+		pageIndexPool[poolIndex] = PAGE_INDEX_POOL_USED;
+		commitMutex.unlock();
 
 		// 仮想アドレスのcommit
 		uint8_t* page = heap + pageSize * pageIndex;
@@ -57,7 +71,7 @@ namespace sh {
 		header->bucketIndex = bucketIndex;
 
 		// メモリ内部に位置情報を付ける
-		uint32_t elementSize = bucketIndex * NE_SMALL_UNIT_SIZE;
+		uint32_t elementSize = BucketIndex2ElementSize(bucketIndex);
 		auto& bucketHead = buckets[bucketIndex];
 		NE_ASSERT(bucketHead == END_BUCKET);
 		bucketHead = (Offset)(page - heap) + elementSize;
@@ -125,13 +139,12 @@ namespace sh {
 		VirtualFree(page, pageSize, MEM_DECOMMIT);
 
 		// pageIndexの返却
-		uint32_t poolIndex = poolHead.fetch_add(1);
-		// fetchしてから1を足さないと同値を取得する恐れがある
-		poolIndex++;
-		NE_ASSERT(pageIndexPool[poolIndex] == UINT32_MAX);
-		pageIndexPool[poolIndex] = pageIndex;
+		commitMutex.lock();
+		uint32_t poolIndex = ++poolHead;
 		
-		NE_ASSERT(poolHead.load() < reserveSize / pageSize);
+		NE_ASSERT(pageIndexPool[poolIndex] == PAGE_INDEX_POOL_USED);
+		pageIndexPool[poolIndex] = pageIndex;
+		commitMutex.unlock();
 
 	}
 
@@ -144,7 +157,7 @@ namespace sh {
 		NE_ASSERT(size % NE_SMALL_UNIT_SIZE == 0);
 		NE_ASSERT(size < NE_SMALL_SIZE_MAX);
 
-		int bucketIndex = size / NE_SMALL_UNIT_SIZE;
+		int bucketIndex = (size - 1) / NE_SMALL_UNIT_SIZE;
 		auto& bucketHead = buckets[bucketIndex];
 		if (bucketHead == END_BUCKET) {
 			// commit出来なかったらnullptrを返す
@@ -170,7 +183,7 @@ namespace sh {
 		int bucketIndex = header->bucketIndex;
 		auto& bucketHead = buckets[bucketIndex];
 		header->useCount--;
-		NE_ASSERT(header->useCount < pageSize / (bucketIndex * NE_SMALL_UNIT_SIZE));
+		NE_ASSERT(header->useCount < pageSize / BucketIndex2ElementSize(bucketIndex));
 
 		if (header->useCount == 0) {
 			decommit(pageIndex);
@@ -210,6 +223,7 @@ void nemalloc_init(size_t shReserveSize)
 	for (int i = 0; i < shReserveSize / pageSize; i++) {
 		sh::pageIndexPool[i] = i;
 	}
+
 	sh::poolHead = shReserveSize / pageSize - 1;
 }
 
