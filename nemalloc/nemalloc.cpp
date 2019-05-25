@@ -25,18 +25,23 @@ namespace sh {
 	uint32_t* pageIndexPool;
 	std::atomic<uint32_t> poolHead;
 
+	struct PageHeader {
+		uint16_t useCount;
+		uint16_t bucketIndex;
+		uint16_t padding[2];
+	};
+
 	using Offset = uint32_t;
+	constexpr Offset END_BUCKET = UINT32_MAX;
 
 	thread_local Offset buckets[NE_SMALL_MEM_ARRAY_SIZE];
 
 	void commit(int bucketIndex) {
 		NE_ASSERT(bucketIndex < _countof(buckets));
 
-		auto& bucket = buckets[bucketIndex];
-
 		// pageIndexの取得
 		uint32_t poolIndex = poolHead.fetch_sub(1);
-		if (poolIndex == UINT32_MAX) { return; }
+		if (poolIndex == UINT32_MAX) { poolIndex = UINT32_MAX; return; }
 
 		uint32_t pageIndex = pageIndexPool[poolIndex];
 		pageIndexPool[poolIndex] = UINT32_MAX;
@@ -46,12 +51,81 @@ namespace sh {
 		[[maybe_unused]] auto res = VirtualAlloc(page, pageSize, MEM_COMMIT, PAGE_READWRITE);
 		NE_ASSERT(res == page);
 
+		// ページの先頭に情報を載せる
+		PageHeader* header = (PageHeader*)page;
+		header->useCount = 0;
+		header->bucketIndex = bucketIndex;
+
 		// メモリ内部に位置情報を付ける
-		bucket = (Offset)(page - heap);
-		for (uint32_t i = 0; i < pageSize / (bucketIndex * NE_SMALL_UNIT_SIZE); i++) {
-			uint8_t* node = page + (i * bucketIndex * NE_SMALL_UNIT_SIZE);
+		auto& bucketHead = buckets[bucketIndex];
+		NE_ASSERT(bucketHead == END_BUCKET);
+		bucketHead = (Offset)(page - heap);
+		uint8_t* node;
+		for (uint32_t i = 1; i < pageSize / (bucketIndex * NE_SMALL_UNIT_SIZE); i++) {
+			node = page + (i * bucketIndex * NE_SMALL_UNIT_SIZE);
 			*(Offset*)node = (Offset)(node - heap);
 		}
+		// 最後のnodeには終端であることを示すため
+		*(Offset*)node = (Offset)END_BUCKET;
+
+	}
+
+	// メモリ内部の位置情報から該当ページのものを無くす
+	void erasePageIndexFromBucket(uint32_t pageIndex) {
+		NE_ASSERT(pageIndex * pageSize < reserveSize);
+		uint8_t* page = heap + pageSize * pageIndex;
+		PageHeader* header = (PageHeader*)page;
+		NE_ASSERT(header->useCount == 0);
+		auto bucketIndex = header->bucketIndex;
+
+		auto& bucketHead = buckets[bucketIndex];
+
+		auto isPointerInPage = [&](void* p) {
+			return (page <= p) && (p < (page + pageSize));
+		};
+
+		auto isOffsetInPage = [&](Offset offset) {
+			return (pageSize * pageIndex <= offset) && (offset < pageSize * (pageIndex + 1));
+		};
+
+		// 先頭が該当pageであれば変更する
+		while (isOffsetInPage(bucketHead)) {
+			bucketHead = *(Offset*)(heap + bucketHead);
+			if (bucketHead == END_BUCKET) { return; }
+		}
+
+		uint8_t* node = page + bucketHead;
+		while (*node != END_BUCKET) {
+			uint8_t* next = page + *(Offset*)node;
+			while (isPointerInPage(next)) {
+				uint8_t* next = page + *(Offset*)next;
+				if (*(Offset*)next == END_BUCKET) {
+					*(Offset*)node = END_BUCKET;
+					break;
+				}
+			}
+			node = next;
+		}
+	}
+
+	void decommit(uint32_t pageIndex) {
+		NE_ASSERT(pageIndex * pageSize < reserveSize);
+		uint8_t* page = heap + pageSize * pageIndex;
+
+		// メモリ内部から該当ページを削除
+		erasePageIndexFromBucket(pageIndex);
+
+		// 仮想アドレスのDecommit
+		uint8_t* page = heap + pageSize * pageIndex;
+		VirtualFree(page, pageSize, MEM_DECOMMIT);
+
+		// pageIndexの返却
+		uint32_t poolIndex = poolHead.load();
+		NE_ASSERT(pageIndexPool[poolIndex] == UINT32_MAX);
+		pageIndexPool[poolIndex] = pageIndex;
+		poolHead.fetch_add(1);
+		NE_ASSERT(poolHead.load() >= reserveSize / pageSize);
+
 	}
 
 };
