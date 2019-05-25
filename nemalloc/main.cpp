@@ -5,6 +5,7 @@
 
 int main()
 {
+	nemalloc_init();
 	const size_t strSize = 16;
 	char* str = (char*)nemalloc(strSize, 16);
 
@@ -12,4 +13,5 @@ int main()
     std::cout << str << std::endl;
 
 	nefree(str);
+	nemalloc_finalize();
 }
