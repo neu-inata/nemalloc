@@ -28,7 +28,6 @@ int main()
 		nefree(str);
 	}
 
-#if 0
 	auto MassSmallMemoryTest = []() {
 		printf("大量mallocのテスト - Start\n");
 		constexpr uint32_t ARRAY_SIZE = 1024 * 1024 * 8;
@@ -50,7 +49,8 @@ int main()
 		printf("大量mallocのテスト - End\n");
 	};
 	MassSmallMemoryTest();
-	
+
+#if 1
 	// スレッドテスト
 	{
 
@@ -82,12 +82,14 @@ int main()
 		GetSystemInfo(&info);
 
 		uint32_t pageSize = info.dwPageSize;
-		constexpr uint64_t LOOP_COUNT = 1024 * 1024;
+		constexpr uint64_t LOOP_COUNT = 1024 * 128;
 		constexpr int ELEMENT_SIZE = 8;
 		uint8_t** pArray = (uint8_t**)nemalloc(sizeof(uint8_t*) * pageSize, 8);
 
 		// 先頭要素はPageHeaderが使用しているため-1
-		for (uint32_t i = 0; i < pageSize / ELEMENT_SIZE - 1; i++) {
+		const uint32_t PAGE_LOOP = pageSize / ELEMENT_SIZE - 1;
+
+		for (uint32_t i = 0; i < PAGE_LOOP; i++) {
 			pArray[i] = (uint8_t*)nemalloc(ELEMENT_SIZE, 8);
 		}
 
@@ -97,7 +99,7 @@ int main()
 			nefree(p);
 		}
 
-		for (uint32_t i = 0; i < pageSize / ELEMENT_SIZE - 1; i++) {
+		for (uint32_t i = 0; i < PAGE_LOOP; i++) {
 			nefree(pArray[i]);
 		}
 
