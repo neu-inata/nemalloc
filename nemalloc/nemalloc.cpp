@@ -6,7 +6,6 @@
 #include <memoryapi.h>
 #include <sysinfoapi.h>
 
-#define NE_SMALL_UNIT_SIZE 8
 #define NE_SMALL_SIZE_MAX 256
 #define NE_SMALL_MEM_ARRAY_SIZE (NE_SMALL_SIZE_MAX / NE_SMALL_UNIT_SIZE)
 
@@ -205,6 +204,10 @@ size_t alignmentSize(size_t size, size_t align)
 	return (size + align - 1) & ~(align - 1);
 }
 
+inline constexpr bool isPowOf2(uint32_t num) {
+	return !(num & (num - 1));
+}
+
 void nemalloc_init(size_t shReserveSize)
 {
 	// SmallHeapは4GB以下を指定してください
@@ -227,9 +230,10 @@ void nemalloc_init(size_t shReserveSize)
 	sh::poolHead = shReserveSize / pageSize - 1;
 }
 
-void * nemalloc(size_t size, uint32_t align = NE_SMALL_UNIT_SIZE)
+void * nemalloc(size_t size, uint32_t align)
 {
 	if (align < NE_SMALL_UNIT_SIZE) { align = NE_SMALL_UNIT_SIZE; }
+	NE_ASSERT(isPowOf2(align));
 	size = alignmentSize(size, align);
 
 	// 小さなメモリの確保
@@ -253,6 +257,10 @@ void nefree(void * p)
 
 void nemalloc_finalize()
 {
+	static_assert(isPowOf2(NE_SMALL_UNIT_SIZE), "小メモリの最小単位(NE_SMALL_UNIT_SIZE)は2の乗数である必要があります。");
+	static_assert(isPowOf2(NE_SMALL_SIZE_MAX),  "小メモリの最大単位(NE_SMALL_SIZE_MAX)は2の乗数である必要があります。");
+	static_assert(NE_SMALL_SIZE_MAX % NE_SMALL_UNIT_SIZE == 0, "NE_SMALL_SIZE_MAXはNE_SMALL_UNIT_SIZEの倍数である必要があります。");
+
 	VirtualFree(sh::heap, 0, MEM_RELEASE);
 	delete[] sh::pageIndexPool;
 }
