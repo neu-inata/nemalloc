@@ -34,6 +34,31 @@ namespace ne::sh {
 		return (heap <= ptr) && (ptr < heap + reserveSize);
 	}
 
+	uint32_t popPageIndex() {
+		commitMutex.lock();
+		uint32_t poolIndex = poolHead--;
+		if (poolIndex == UINT32_MAX) {
+			poolHead++;
+			commitMutex.unlock();
+			return false;
+		}
+
+		uint32_t pageIndex = pageIndexPool[poolIndex];
+		pageIndexPool[poolIndex] = PAGE_INDEX_INVAILED;
+		commitMutex.unlock();
+
+		return pageIndex;
+	}
+
+	void pushPageIndex(uint32_t pageIndex) {
+		commitMutex.lock();
+		uint32_t poolIndex = ++poolHead;
+
+		NE_ASSERT(pageIndexPool[poolIndex] == PAGE_INDEX_INVAILED);
+		pageIndexPool[poolIndex] = pageIndex;
+		commitMutex.unlock();
+	}
+
 	struct DecommitMargin {
 		uint32_t decommitPool;
 		uint64_t availableCount;
@@ -122,17 +147,7 @@ namespace ne::sh {
 		NE_ASSERT(bucketIndex < _countof(buckets));
 
 		// pageIndexの取得
-		commitMutex.lock();
-		uint32_t poolIndex = poolHead--;
-		if (poolIndex == UINT32_MAX) {
-			poolHead++;
-			commitMutex.unlock();
-			return false;
-		}
-
-		uint32_t pageIndex = pageIndexPool[poolIndex];
-		pageIndexPool[poolIndex] = PAGE_INDEX_INVAILED;
-		commitMutex.unlock();
+		uint32_t pageIndex = popPageIndex();
 
 		// 仮想アドレスのcommit
 		uint8_t* page = heap + pageSize * pageIndex;
@@ -225,12 +240,7 @@ namespace ne::sh {
 		VirtualFree(page, pageSize, MEM_DECOMMIT);
 
 		// pageIndexの返却
-		commitMutex.lock();
-		uint32_t poolIndex = ++poolHead;
-
-		NE_ASSERT(pageIndexPool[poolIndex] == PAGE_INDEX_INVAILED);
-		pageIndexPool[poolIndex] = pageIndex;
-		commitMutex.unlock();
+		pushPageIndex(pageIndex);
 
 		// decommit予約用の使用可能数を減らす
 		decommitMargin[bucketIndex].availableCount -= (pageSize / elementSize) - 1;
