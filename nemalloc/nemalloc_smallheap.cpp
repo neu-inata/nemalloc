@@ -1,13 +1,13 @@
 #include "nemalloc_common.h"
 #include "nemalloc_smallheap.h"
 
+#define UINT24_MAX (0xffffffui32)
 
 namespace ne::sh {
 
 	uint32_t reserveSize;
 	uint8_t* heap;
-	uint32_t* pageIndexPool;
-	constexpr uint32_t PAGE_INDEX_INVAILED = UINT32_MAX;
+	constexpr uint32_t PAGE_INDEX_INVAILED = UINT24_MAX;
 
 	uint32_t poolHead;
 	std::mutex commitMutex;
@@ -22,6 +22,22 @@ namespace ne::sh {
 		uint16_t padding[2];
 	};
 
+	union TagIndex {
+		struct {
+			uint32_t tag    :  8;
+			uint32_t index  : 24;
+			uint32_t poolIndex : 32;
+		} toi;
+		uint64_t u;
+
+		static const uint64_t Invailed = UINT64_MAX;
+	};
+	static_assert(sizeof(TagIndex) == sizeof(uint64_t));
+
+	std::atomic<uint64_t>* pageIndexPool;
+	std::atomic<uint32_t>  pageTag;
+	std::atomic<uint64_t>  pageHeadIndex;
+
 	inline int BucketIndex2ElementSize(int bucketIndex) {
 		return (bucketIndex + 1) * NE_SMALL_UNIT_SIZE;
 	}
@@ -34,28 +50,34 @@ namespace ne::sh {
 		return (heap <= ptr) && (ptr < heap + reserveSize);
 	}
 
-	uint32_t popPageIndex() {
+	uint32_t PopPageIndex() {
 		commitMutex.lock();
 		uint32_t poolIndex = poolHead--;
 		if (poolIndex == UINT32_MAX) {
 			poolHead++;
 			commitMutex.unlock();
-			return false;
+			return PAGE_INDEX_INVAILED;
 		}
 
-		uint32_t pageIndex = pageIndexPool[poolIndex];
-		pageIndexPool[poolIndex] = PAGE_INDEX_INVAILED;
+		TagIndex tagIndex;
+		tagIndex.u = pageIndexPool[poolIndex];
+		uint32_t pageIndex = tagIndex.toi.index;
+		pageIndexPool[poolIndex] = TagIndex::Invailed;
 		commitMutex.unlock();
 
 		return pageIndex;
 	}
 
-	void pushPageIndex(uint32_t pageIndex) {
+	void PushPageIndex(uint32_t pageIndex) {
 		commitMutex.lock();
 		uint32_t poolIndex = ++poolHead;
 
-		NE_ASSERT(pageIndexPool[poolIndex] == PAGE_INDEX_INVAILED);
-		pageIndexPool[poolIndex] = pageIndex;
+		NE_ASSERT(pageIndexPool[poolIndex] == TagIndex::Invailed);
+		TagIndex tagIndex;
+		tagIndex.toi.tag   = pageTag.fetch_add(1);
+		tagIndex.toi.poolIndex = 0;
+		tagIndex.toi.index = pageIndex;
+		pageIndexPool[poolIndex] = tagIndex.u;
 		commitMutex.unlock();
 	}
 
@@ -117,8 +139,8 @@ namespace ne::sh {
 		static_assert(IsPowOf2(NE_SMALL_SIZE_MAX), "小メモリの最大単位(NE_SMALL_SIZE_MAX)は2の乗数である必要があります。");
 		static_assert(NE_SMALL_SIZE_MAX % NE_SMALL_UNIT_SIZE == 0, "NE_SMALL_SIZE_MAXはNE_SMALL_UNIT_SIZEの倍数である必要があります。");
 
-		// SmallHeapは4GB以下を指定してください
-		NE_ASSERT(shReserveSize < UINT32_MAX);
+		// SmallHeapは512MB以下を指定してください
+		NE_ASSERT(shReserveSize < 512*1024*1024);
 		sh::reserveSize = shReserveSize;
 
 		SYSTEM_INFO info;
@@ -129,11 +151,20 @@ namespace ne::sh {
 		shReserveSize = AlignmentSize(shReserveSize, info.dwPageSize);
 		sh::heap = (uint8_t*)VirtualAlloc(nullptr, shReserveSize, MEM_RESERVE, PAGE_READWRITE);
 
-		sh::pageIndexPool = new uint32_t[shReserveSize / pageSize];
-		for (uint32_t i = 0; i < shReserveSize / pageSize; i++) {
-			sh::pageIndexPool[i] = i;
-		}
+		NE_ASSERT(shReserveSize / pageSize <= UINT24_MAX);
 
+		sh::pageIndexPool = new std::atomic<uint64_t>[shReserveSize / pageSize];
+
+		pageHeadIndex = 0;
+		pageTag = 0;
+		for (uint32_t i = 0; i < shReserveSize / pageSize; i++) {
+			TagIndex tagIndex;
+			tagIndex.toi.tag = pageTag.fetch_add(1);
+			tagIndex.toi.poolIndex = i;
+			tagIndex.toi.index = i;
+			
+			pageIndexPool[i] = tagIndex.u;
+		}
 		sh::poolHead = shReserveSize / pageSize - 1;
 	}
 
@@ -147,7 +178,7 @@ namespace ne::sh {
 		NE_ASSERT(bucketIndex < _countof(buckets));
 
 		// pageIndexの取得
-		uint32_t pageIndex = popPageIndex();
+		uint32_t pageIndex = PopPageIndex();
 
 		// 仮想アドレスのcommit
 		uint8_t* page = heap + pageSize * pageIndex;
@@ -240,7 +271,7 @@ namespace ne::sh {
 		VirtualFree(page, pageSize, MEM_DECOMMIT);
 
 		// pageIndexの返却
-		pushPageIndex(pageIndex);
+		PushPageIndex(pageIndex);
 
 		// decommit予約用の使用可能数を減らす
 		decommitMargin[bucketIndex].availableCount -= (pageSize / elementSize) - 1;
